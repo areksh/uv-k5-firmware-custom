@@ -42,6 +42,10 @@
 #include "ui/menu.h"
 #include "ui/ui.h"
 
+// minimal backup for live CSS apply in menu (to restore on EXIT without committing)
+static uint8_t _bk_css_b; // bit0=RX saved, bit1=TX saved
+static uint8_t _bk_rx_t,_bk_rx_c,_bk_tx_t,_bk_tx_c;
+
 #ifndef ARRAY_SIZE
     #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
 #endif
@@ -909,7 +913,7 @@ void MENU_AcceptSetting(void)
             }
             break;
 
-#ifdef ENABLE_FEAT_F4HWN_SLEEP 
+#ifdef ENABLE_FEAT_F4HWN_SLEEP
         case MENU_SET_OFF:
             gSetting_set_off = gSubMenuSelection;
             break;
@@ -1275,7 +1279,7 @@ void MENU_ShowCurrentSetting(void)
                 break;
     #endif
 #endif
-                
+
         #ifdef ENABLE_NOAA
             case MENU_NOAA_S:
                 gSubMenuSelection = gEeprom.NOAA_AUTO_SCAN;
@@ -1358,7 +1362,7 @@ void MENU_ShowCurrentSetting(void)
             break;
         }
 
-#ifdef ENABLE_FEAT_F4HWN_SLEEP 
+#ifdef ENABLE_FEAT_F4HWN_SLEEP
         case MENU_SET_OFF:
             gSubMenuSelection = gSetting_set_off;
             break;
@@ -1616,6 +1620,22 @@ static void MENU_Key_EXIT(bool bKeyPressed, bool bKeyHeld)
                 gInputBoxIndex      = 0;
                 gFlagRefreshSetting = true;
 
+                // restore original CSS if we were live-applying and user exits without accepting
+                {
+                    const int id = UI_MENU_GetCurrentMenuId();
+                    if ((id==MENU_R_CTCS || id==MENU_R_DCS) && (_bk_css_b & 1)) {
+                        gTxVfo->freq_config_RX.CodeType = _bk_rx_t; gTxVfo->freq_config_RX.Code = _bk_rx_c;
+                        if (_bk_rx_t==CODE_TYPE_CONTINUOUS_TONE) BK4819_SetCTCSSFrequency(CTCSS_Options[_bk_rx_c]);
+                        else if (_bk_rx_t==CODE_TYPE_DIGITAL || _bk_rx_t==CODE_TYPE_REVERSE_DIGITAL) BK4819_SetCDCSSCodeWord(DCS_GetGolayCodeWord(_bk_rx_t, _bk_rx_c));
+                        else BK4819_SetCTCSSFrequency(SQL_TONE);
+                        _bk_css_b &= (uint8_t)~1;
+                    }
+                    if ((id==MENU_T_CTCS || id==MENU_T_DCS) && (_bk_css_b & 2)) {
+                        gTxVfo->freq_config_TX.CodeType = _bk_tx_t; gTxVfo->freq_config_TX.Code = _bk_tx_c;
+                        _bk_css_b &= (uint8_t)~2;
+                    }
+                }
+
                 #ifdef ENABLE_VOICE
                     gAnotherVoiceID = VOICE_ID_CANCEL;
                 #endif
@@ -1668,9 +1688,9 @@ static void MENU_Key_MENU(const bool bKeyPressed, const bool bKeyHeld)
             if (UI_MENU_GetCurrentMenuId() != MENU_SCR)
                 gAnotherVoiceID = MenuList[gMenuCursor].voice_id;
         #endif
-        if (UI_MENU_GetCurrentMenuId() == MENU_UPCODE 
-            || UI_MENU_GetCurrentMenuId() == MENU_DWCODE 
-#ifdef ENABLE_DTMF_CALLING 
+        if (UI_MENU_GetCurrentMenuId() == MENU_UPCODE
+            || UI_MENU_GetCurrentMenuId() == MENU_DWCODE
+#ifdef ENABLE_DTMF_CALLING
             || UI_MENU_GetCurrentMenuId() == MENU_ANI_ID
 #endif
             )
@@ -1688,6 +1708,13 @@ static void MENU_Key_MENU(const bool bKeyPressed, const bool bKeyHeld)
         {
             gInputBoxIndex      = 0;
             edit_index          = -1;
+        }
+
+        // backup original CSS for live-apply revert on EXIT
+        {
+            const int id = UI_MENU_GetCurrentMenuId();
+            if (id == MENU_R_CTCS || id == MENU_R_DCS) { _bk_rx_t = gTxVfo->freq_config_RX.CodeType; _bk_rx_c = gTxVfo->freq_config_RX.Code; _bk_css_b |= 1; }
+            if (id == MENU_T_CTCS || id == MENU_T_DCS) { _bk_tx_t = gTxVfo->freq_config_TX.CodeType; _bk_tx_c = gTxVfo->freq_config_TX.Code; _bk_css_b |= 2; }
         }
 
         return;
@@ -1945,6 +1972,22 @@ static void MENU_Key_UP_DOWN(bool bKeyPressed, bool bKeyHeld, int8_t Direction)
 
         default:
             MENU_ClampSelection(Direction);
+            if (gIsInSubMenu) {
+                const int id = UI_MENU_GetCurrentMenuId();
+                if (id==MENU_R_CTCS || id==MENU_T_CTCS || id==MENU_R_DCS || id==MENU_T_DCS) {
+                    const int sel = gSubMenuSelection;
+                    uint8_t t = CODE_TYPE_OFF, c = 0;
+                    if (id==MENU_R_CTCS || id==MENU_T_CTCS) { if (sel) { t = CODE_TYPE_CONTINUOUS_TONE; c = sel - 1; } }
+                    else { if (sel) { if (sel < 105) { t = CODE_TYPE_DIGITAL; c = sel - 1; } else { t = CODE_TYPE_REVERSE_DIGITAL; c = sel - 105; } } }
+                    if (id==MENU_R_CTCS || id==MENU_R_DCS) {
+                        // live-apply to RX hardware without committing to EEPROM
+                        if (t==CODE_TYPE_CONTINUOUS_TONE) BK4819_SetCTCSSFrequency(CTCSS_Options[c]);
+                        else if (t==CODE_TYPE_DIGITAL || t==CODE_TYPE_REVERSE_DIGITAL) BK4819_SetCDCSSCodeWord(DCS_GetGolayCodeWord(t, c));
+                        else BK4819_SetCTCSSFrequency(SQL_TONE);
+                        gTxVfo->freq_config_RX.CodeType = t; gTxVfo->freq_config_RX.Code = c;
+                    } else { gTxVfo->freq_config_TX.CodeType = t; gTxVfo->freq_config_TX.Code = c; }
+                }
+            }
             gRequestDisplayScreen = DISPLAY_MENU;
             return;
     }
